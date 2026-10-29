@@ -1,0 +1,100 @@
+#!/bin/bash
+
+OUTPUT_XML="/home/executor/execution/output/output.xml"
+TEMP_HTML="/home/executor/execution/output/log_output.html"
+FINAL_PDF="/home/executor/execution/output/keyword_logs.pdf"
+SCREENSHOTS_DIR="/home/executor/execution/output/screenshots"
+
+if [ -f "$OUTPUT_XML" ]; then
+    echo "Parsing output.xml for Log keyword messages..."
+
+    # Extract the test/script name from <test> tag
+    SCRIPT_NAME=$(sed -n 's/.*<test [^>]*name="\([^"]*\)".*/\1/p' "$OUTPUT_XML" | head -1)
+
+    if [ -z "$SCRIPT_NAME" ]; then
+        SCRIPT_NAME="Unknown Script"
+    fi
+
+    # Create HTML header
+    cat > "$TEMP_HTML" <<EOF
+<html>
+<head>
+<style>
+    @page { margin: 15mm; }
+    body { font-family: monospace; font-size: 12px; line-height: 1.5; padding: 20px; }
+    h2 { color: #333; }
+    h3 { color: #555; margin-top: 5px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; page-break-inside: auto; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+    th { background-color: #f0f0f0; }
+    tr { page-break-inside: avoid; }
+    .error-section { page-break-before: always; border-top: 2px solid red; padding-top: 15px; }
+    .error-section h3 { color: red; }
+    .error-block { page-break-inside: avoid; margin-bottom: 20px; }
+    .error-img { max-width: 100%; max-height: 700px; object-fit: contain; border: 1px solid #ccc; margin: 10px 0; }
+    .error-label { color: red; font-weight: bold; margin-top: 15px; }
+</style>
+</head>
+<body>
+<h2>CRT Test Execution - Custom Log Messages</h2>
+<h3>Script: ${SCRIPT_NAME}</h3>
+<table>
+<tr><th>#</th><th>Timestamp</th><th>Message</th></tr>
+EOF
+
+    # Use awk to extract only <msg> content inside <kw name="Log"> blocks
+    COUNT=0
+    awk '/<kw name="Log" owner="BuiltIn">/{found=1} found && /<msg /{print} /<\/kw>/{found=0}' "$OUTPUT_XML" | \
+    sed -n 's/.*<msg time="\([^"]*\)" level="[^"]*"[^>]*>\([^<]*\)<\/msg>.*/\1|\2/p' | \
+    while IFS='|' read -r timestamp message; do
+        if [ -n "$message" ]; then
+            COUNT=$((COUNT + 1))
+            safe_msg=$(echo "$message" | sed 's/&/\&/g; s/</\&lt;/g; s/>/\>/g')
+            echo "<tr><td>${COUNT}</td><td>${timestamp}</td><td>${safe_msg}</td></tr>" >> "$TEMP_HTML"
+        fi
+    done
+
+    echo "</table>" >> "$TEMP_HTML"
+
+    # Check for error screenshots (filenames starting with "error")
+    ERROR_SCREENSHOTS=$(find "$SCREENSHOTS_DIR" -maxdepth 1 -type f -iname "error*" 2>/dev/null)
+
+    if [ -n "$ERROR_SCREENSHOTS" ]; then
+        echo "<div class='error-section'>" >> "$TEMP_HTML"
+        echo "<h3>Error Screenshots</h3>" >> "$TEMP_HTML"
+
+        for img in $ERROR_SCREENSHOTS; do
+            filename=$(basename "$img")
+            base64_img=$(base64 -w 0 "$img")
+            echo "<div class='error-block'>" >> "$TEMP_HTML"
+            echo "<p class='error-label'>${filename}</p>" >> "$TEMP_HTML"
+            echo "<img class='error-img' src='data:image/png;base64,${base64_img}' />" >> "$TEMP_HTML"
+            echo "</div>" >> "$TEMP_HTML"
+        done
+
+        echo "</div>" >> "$TEMP_HTML"
+    fi
+
+    # Close HTML
+    echo "</body></html>" >> "$TEMP_HTML"
+
+    # Convert to PDF
+    if command -v google-chrome &> /dev/null; then
+        google-chrome --headless --disable-gpu --no-sandbox --print-to-pdf="$FINAL_PDF" "file://$TEMP_HTML"
+        echo "PDF generated successfully at $FINAL_PDF"
+    elif command -v chromium &> /dev/null; then
+        chromium --headless --disable-gpu --no-sandbox --print-to-pdf="$FINAL_PDF" "file://$TEMP_HTML"
+        echo "PDF generated successfully at $FINAL_PDF"
+    elif command -v chromium-browser &> /dev/null; then
+        chromium-browser --headless --disable-gpu --no-sandbox --print-to-pdf="$FINAL_PDF" "file://$TEMP_HTML"
+        echo "PDF generated successfully at $FINAL_PDF"
+    else
+        echo "Warning: Chrome/Chromium not found. Log available as HTML at $TEMP_HTML"
+        exit 0
+    fi
+
+    echo "Report complete."
+else
+    echo "Error: output.xml not found at $OUTPUT_XML."
+    exit 1
+fi
